@@ -708,20 +708,7 @@ def build_demo(embed_mode):
             [state, model_selector],
             [textbox_3, upvote_btn, downvote_btn, flag_btn],
         )
-        regenerate_btn.click(
-            regenerate,
-            state,
-            [
-                state,
-                chatbot,
-            ]
-            + demo_list
-            + [
-                textbox_3,
-                imagebox_3,
-            ]
-            + btn_list,
-        ).then(
+        regenerate_btn.click(regenerate, state, [state, chatbot,] + demo_list + [textbox_3, imagebox_3,] + btn_list,).then(
             http_bot,
             [
                 state,

@@ -26,6 +26,11 @@ from pipeline.train.data import get_data
 from pipeline.train.distributed import world_info_from_env
 from pipeline.train.train_utils import AverageMeter, get_checkpoint
 
+# for continual learning
+import logging
+import sys
+from pipeline.train.continual_data import DataManager, get_continual_data
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
@@ -40,6 +45,11 @@ def random_seed(seed=42, rank=0):
     torch.manual_seed(seed + rank)
     np.random.seed(seed + rank)
     random.seed(seed + rank)
+
+
+def model_eval():
+    print("model eval")
+    return np.random.random()
 
 
 def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, lr_scheduler, device_id, accelerator, wandb):
@@ -416,6 +426,32 @@ def parse_args():
         help="delete previous checkpoint when saving new checkpoint",
     )
 
+    # continual args
+    parser.add_argument(
+        "--model_name",
+        type=str,
+        default="otter_finetune",
+        help="tuning technique",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="vqa",
+        help="continual dataset",
+    )
+    parser.add_argument(
+        "--data_seed",
+        type=int,
+        default=1993,
+        help="random seed",
+    )
+    parser.add_argument(
+        "--convnet_type",
+        type=str,
+        default="flamingo",
+        help="convnet type",
+    )
+
     # parser = add_data_args(parser)
     args = parser.parse_args()
 
@@ -443,13 +479,220 @@ def parse_args():
     return args
 
 
-def main():
-    args = parse_args()
+# def main():
+#     args = parse_args()
+#     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
+
+#     device_id = accelerator.device
+
+#     # random_seed(args.seed)
+
+#     if args.pretrained_model_name_or_path is not None:
+#         accelerator.print(f"Loading pretrained model from {args.pretrained_model_name_or_path}")
+#         if "otter" in args.run_name.lower():
+#             model = OtterForConditionalGeneration.from_pretrained(
+#                 args.pretrained_model_name_or_path,
+#                 device_map="auto",  # {"": device_id},
+#                 local_files_only=args.offline,
+#             )
+#         elif "flamingo" in args.run_name.lower():
+#             model = FlamingoForConditionalGeneration.from_pretrained(
+#                 args.pretrained_model_name_or_path,
+#                 device_map="auto",
+#                 local_files_only=args.offline,
+#             )
+#             model.text_tokenizer.add_special_tokens({"additional_special_tokens": ["<|endofchunk|>", "<image>", "<answer>"]})
+#     else:
+#         config = FlamingoConfig.from_json_file("./flamingo/config.json")
+#         model = FlamingoForConditionalGeneration(config=config)
+
+#         """
+#         TODO: deprecate this option since the original checkpoints are not supported in future versions
+#         TODO: all future checkpoints (even released from openflamingo), we will convert them and save to huggingface format.
+#         TODO: supposedly using "args.pretrained_model_name_or_path" should be the best way to load the model.
+#         """
+#         if args.load_from_original_checkpoint is not None:
+#             print(f"Loading checkpoint from {args.load_from_original_checkpoint}")
+#             model.load_state_dict(
+#                 torch.load(args.load_from_original_checkpoint, map_location="cpu"),
+#                 False,
+#             )
+
+#     accelerator.wait_for_everyone()
+
+#     if model.lang_encoder.__class__.__name__ == "LlamaForCausalLM":
+#         model.lang_encoder.resize_token_embeddings(len(model.text_tokenizer))
+
+#     args.tokenizer = model.text_tokenizer
+#     tokenizer = model.text_tokenizer
+#     random_seed(args.seed, args.rank)
+
+#     print(f"Start running training on rank {args.rank}.")
+
+#     # device_id = args.rank % torch.cuda.device_count()
+
+#     image_processor = CLIPImageProcessor()
+#     mimicit_loaders = get_data(args, image_processor, tokenizer, "mimicit")
+
+#     def get_grouped_params(model):
+#         params_with_wd, params_without_wd = [], []
+
+#         def apply_decay(x):
+#             return "gated_cross_attn_layer" in x and "ff_gate" not in x and "attn_gate" not in x and "norm" not in x and "bias" not in x
+
+#         for n, p in model.named_parameters():
+#             # if p.requires_grad:
+#             if apply_decay(n):
+#                 params_with_wd.append(p)
+#             else:
+#                 params_without_wd.append(p)
+
+#         return [
+#             {"params": params_with_wd, "weight_decay": args.weight_decay},
+#             {"params": params_without_wd, "weight_decay": 0.0},
+#         ]
+
+#     total_training_steps = len(mimicit_loaders[0]) * args.num_epochs
+
+#     resume_from_epoch = 0
+#     # check if a checkpoint exists for this run
+#     args.external_save_dir = os.path.join(args.external_save_dir, args.run_name) if args.external_save_dir else args.run_name
+#     if os.path.exists(f"{args.external_save_dir}") and args.resume_from_checkpoint is True:
+#         checkpoint_list = glob.glob(f"{args.external_save_dir}/checkpoint_*.pt")
+#         if len(checkpoint_list) == 0:
+#             print(f"Found no checkpoints for run {args.external_save_dir}.")
+#         else:
+#             resume_from_checkpoint_path = sorted(checkpoint_list, key=lambda x: int(x.split("_")[-1].split(".")[0]))[-1]
+#             print(f"Found checkpoint {resume_from_checkpoint_path} for run {args.external_save_dir}.")
+
+#         if args.rank == 0:
+#             print(f"Loading checkpoint from {resume_from_checkpoint_path}")
+#         checkpoint = torch.load(resume_from_checkpoint_path, map_location="cpu")
+#         model.load_state_dict(checkpoint["model_state_dict"], False)
+#         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+#         lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
+#         resume_from_epoch = checkpoint["epoch"] + 1
+
+#     optimizer = torch.optim.AdamW(get_grouped_params(model), lr=args.learning_rate)
+
+#     if args.rank == 0:
+#         print(f"Total training steps: {total_training_steps}")
+
+#     args.warmup_steps = total_training_steps * args.warmup_steps_ratio if args.warmup_steps_ratio is not None else args.warmup_steps
+
+#     if args.lr_scheduler == "linear":
+#         lr_scheduler = get_linear_schedule_with_warmup(
+#             optimizer,
+#             num_warmup_steps=args.warmup_steps // args.gradient_accumulation_steps,
+#             num_training_steps=total_training_steps // args.gradient_accumulation_steps,
+#         )
+#     elif args.lr_scheduler == "cosine":
+#         lr_scheduler = get_cosine_schedule_with_warmup(
+#             optimizer,
+#             num_warmup_steps=args.warmup_steps // args.gradient_accumulation_steps,
+#             num_training_steps=total_training_steps // args.gradient_accumulation_steps,
+#         )
+#     else:
+#         lr_scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps)
+
+#     if args.rank == 0 and args.report_to_wandb:
+#         wandb.init(
+#             project=args.wandb_project,
+#             # entity=args.wandb_entity,
+#             name=args.run_name,
+#             config=vars(args),
+#         )
+
+#     model, optimizer, lr_scheduler, mimicit_loaders = accelerator.prepare(model, optimizer, lr_scheduler, mimicit_loaders)
+#     model.train()
+
+#     for epoch in range(resume_from_epoch, args.num_epochs):
+#         for cur_data_loader in mimicit_loaders:
+#             cur_data_loader.dataset.set_epoch(epoch)
+
+#         train_one_epoch(
+#             args=args,
+#             model=model,
+#             epoch=epoch,
+#             tokenizer=tokenizer,
+#             optimizer=optimizer,
+#             lr_scheduler=lr_scheduler,
+#             mimicit_loaders=mimicit_loaders,
+#             accelerator=accelerator,
+#             device_id=device_id,
+#             wandb=wandb,
+#         )
+#         accelerator.wait_for_everyone()
+
+#         if args.rank == 0:
+#             if not os.path.exists(args.external_save_dir):
+#                 os.makedirs(args.external_save_dir)
+
+#             unwrapped_model = accelerator.unwrap_model(model)
+#             checkpoint_dict = {
+#                 "epoch": epoch,
+#                 "model_state_dict": get_checkpoint(unwrapped_model),
+#                 "optimizer_state_dict": optimizer.state_dict(),
+#                 "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+#             }
+#             print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+#             accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+#             # save the config
+#             unwrapped_model.config.save_pretrained(args.external_save_dir)
+#             if args.delete_previous_checkpoint:
+#                 if epoch > 0:
+#                     os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+
+#         accelerator.wait_for_everyone()
+
+#     accelerator.wait_for_everyone()
+#     if args.rank == 0:
+#         if not os.path.exists(args.external_save_dir):
+#             os.makedirs(args.external_save_dir)
+
+#         unwrapped_model = accelerator.unwrap_model(model)
+#         accelerator.save(
+#             get_checkpoint(model=unwrapped_model),
+#             f"{args.external_save_dir}/final_weights.pt",
+#         )
+#         # save the config
+#         unwrapped_model.config.save_pretrained(args.external_save_dir)
+
+#         if args.report_to_wandb and args.save_checkpoints_to_wandb:
+#             wandb.save(f"{args.external_save_dir}/final_weights.pt")
+#         if args.save_hf_model:
+#             model.save_pretrained(f"{args.external_save_dir}")
+
+
+def print_args(args):
+    for arg in vars(args):
+        logging.info("{}: {}".format(arg, getattr(args, arg)))
+
+
+def _train(args):
+    logs_name = "logs/{}/{}".format(args.model_name, args.dataset)
+    if not os.path.exists(logs_name):
+        os.makedirs(logs_name)
+    logfilename = "logs/{}/{}//{}_{}".format(
+        args.model_name,
+        args.dataset,
+        args.data_seed,
+        args.convnet_type,
+    )
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(filename)s] => %(message)s",
+        handlers=[
+            logging.FileHandler(filename=logfilename + ".log"),
+            logging.StreamHandler(sys.stdout),
+        ],
+    )
+    print_args(args)
+    # data_manager = DataManager(args)
+    # model = factory.get_model(args["model_name"], args)
+
     accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps)
-
     device_id = accelerator.device
-
-    # random_seed(args.seed)
 
     if args.pretrained_model_name_or_path is not None:
         accelerator.print(f"Loading pretrained model from {args.pretrained_model_name_or_path}")
@@ -469,12 +712,6 @@ def main():
     else:
         config = FlamingoConfig.from_json_file("./flamingo/config.json")
         model = FlamingoForConditionalGeneration(config=config)
-
-        """
-        TODO: deprecate this option since the original checkpoints are not supported in future versions
-        TODO: all future checkpoints (even released from openflamingo), we will convert them and save to huggingface format.
-        TODO: supposedly using "args.pretrained_model_name_or_path" should be the best way to load the model.
-        """
         if args.load_from_original_checkpoint is not None:
             print(f"Loading checkpoint from {args.load_from_original_checkpoint}")
             model.load_state_dict(
@@ -493,10 +730,9 @@ def main():
 
     print(f"Start running training on rank {args.rank}.")
 
-    # device_id = args.rank % torch.cuda.device_count()
-
     image_processor = CLIPImageProcessor()
-    mimicit_loaders = get_data(args, image_processor, tokenizer, "mimicit")
+    # mimicit_loaders = get_data(args, image_processor, tokenizer, "mimicit")
+    mimicit_train_loaders, mimicit_test_loaders = get_continual_data(args, image_processor, tokenizer, "mimicit")
 
     def get_grouped_params(model):
         params_with_wd, params_without_wd = [], []
@@ -516,7 +752,7 @@ def main():
             {"params": params_without_wd, "weight_decay": 0.0},
         ]
 
-    total_training_steps = len(mimicit_loaders[0]) * args.num_epochs
+    total_training_steps = len(mimicit_train_loaders[0][0]) * args.num_epochs
 
     resume_from_epoch = 0
     # check if a checkpoint exists for this run
@@ -567,47 +803,53 @@ def main():
             config=vars(args),
         )
 
-    model, optimizer, lr_scheduler, mimicit_loaders = accelerator.prepare(model, optimizer, lr_scheduler, mimicit_loaders)
+    model, optimizer, lr_scheduler, mimicit_train_loaders, mimicit_test_loaders = accelerator.prepare(
+        model, optimizer, lr_scheduler, mimicit_train_loaders, mimicit_test_loaders
+    )
     model.train()
 
-    for epoch in range(resume_from_epoch, args.num_epochs):
-        for cur_data_loader in mimicit_loaders:
-            cur_data_loader.dataset.set_epoch(epoch)
+    for task in range(len(mimicit_train_loaders)):
+        for epoch in range(resume_from_epoch, args.num_epochs):
+            # for cur_data_loader in mimicit_train_loaders[task]:
+            #     cur_data_loader.dataset.set_epoch(epoch)
 
-        train_one_epoch(
-            args=args,
-            model=model,
-            epoch=epoch,
-            tokenizer=tokenizer,
-            optimizer=optimizer,
-            lr_scheduler=lr_scheduler,
-            mimicit_loaders=mimicit_loaders,
-            accelerator=accelerator,
-            device_id=device_id,
-            wandb=wandb,
-        )
-        accelerator.wait_for_everyone()
+            train_one_epoch(
+                args=args,
+                model=model,
+                epoch=epoch,
+                tokenizer=tokenizer,
+                optimizer=optimizer,
+                lr_scheduler=lr_scheduler,
+                mimicit_loaders=mimicit_train_loaders[task],
+                accelerator=accelerator,
+                device_id=device_id,
+                wandb=wandb,
+            )
 
-        if args.rank == 0:
-            if not os.path.exists(args.external_save_dir):
-                os.makedirs(args.external_save_dir)
+            perf = model_eval()
 
-            unwrapped_model = accelerator.unwrap_model(model)
-            checkpoint_dict = {
-                "epoch": epoch,
-                "model_state_dict": get_checkpoint(unwrapped_model),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-            }
-            print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
-            accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
-            # save the config
-            unwrapped_model.config.save_pretrained(args.external_save_dir)
-            if args.delete_previous_checkpoint:
-                if epoch > 0:
-                    os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+            accelerator.wait_for_everyone()
 
-        accelerator.wait_for_everyone()
+            if args.rank == 0:
+                if not os.path.exists(args.external_save_dir):
+                    os.makedirs(args.external_save_dir)
+
+                unwrapped_model = accelerator.unwrap_model(model)
+                checkpoint_dict = {
+                    "epoch": epoch,
+                    "model_state_dict": get_checkpoint(unwrapped_model),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+                }
+                print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+                accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+                # save the config
+                unwrapped_model.config.save_pretrained(args.external_save_dir)
+                if args.delete_previous_checkpoint:
+                    if epoch > 0:
+                        os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+
+            accelerator.wait_for_everyone()
 
     accelerator.wait_for_everyone()
     if args.rank == 0:
@@ -627,6 +869,24 @@ def main():
         if args.save_hf_model:
             model.save_pretrained(f"{args.external_save_dir}")
 
+    # perf_curve = {"top1": [], "top5": []}
+    # for task in range(data_manager.nb_tasks):
+    #     logging.info("All params: {}".format(count_parameters(model._network)))
+    #     logging.info(
+    #         "Trainable params: {}".format(count_parameters(model._network, True))
+    #     )
+    #     model.incremental_train(data_manager)
+    #     cnn_accy, nme_accy = model.eval_task()
+    #     model.after_task()
+    #     logging.info("CNN: {}".format(cnn_accy["grouped"]))
+    #     perf_curve["top1"].append(cnn_accy["top1"])
+    #     logging.info("CNN top1 curve: {}".format(perf_curve["top1"]))
+    #     print('Average Accuracy (CNN):', sum(perf_curve["top1"])/len(perf_curve["top1"]))
+    #     logging.info("Average Accuracy (CNN): {}".format(sum(perf_curve["top1"])/len(perf_curve["top1"])))
+
 
 if __name__ == "__main__":
-    main()
+    # main()
+
+    args = parse_args()
+    _train(args)
