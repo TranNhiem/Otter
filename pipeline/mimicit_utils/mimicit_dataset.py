@@ -9,7 +9,7 @@ import re
 import contextlib
 import os
 import orjson
-
+import ijson.backends.yajl2_c as ijson
 from PIL import ImageFile
 from torchvision import transforms
 import random
@@ -87,12 +87,15 @@ class MimicitDataset(Dataset):
         self.epoch = 0
 
         self.inst_format = args.inst_format
+        self.resample_frames = args.resample_frames
 
         scales = [(args.patch_image_size, args.patch_image_size)]
 
         self.patch_resize_transform = transforms.Compose(
             [
-                transforms.Resize((args.patch_image_size, args.patch_image_size), interpolation=transforms.InterpolationMode.BICUBIC),
+                transforms.Resize(
+                    (args.patch_image_size, args.patch_image_size), interpolation=transforms.InterpolationMode.BICUBIC
+                ),
                 transforms.ToTensor(),
                 transforms.Normalize(mean=FLAMINGO_MEAN, std=FLAMINGO_STD),
             ]
@@ -104,7 +107,9 @@ class MimicitDataset(Dataset):
         self.train_config_paths = train_config_paths if train_config_paths != "" else [""] * len(mimicit_paths)
         self.status_list = status_list
 
-        assert len(self.mimicit_paths) == len(self.images_paths) == len(self.train_config_paths) == len(self.status_list), f"metas do not have same number"
+        assert (
+            len(self.mimicit_paths) == len(self.images_paths) == len(self.train_config_paths) == len(self.status_list)
+        ), f"metas do not have same number"
 
         self.dataset = {}
         self.images = {}
@@ -123,17 +128,23 @@ class MimicitDataset(Dataset):
                     self.dataset.update(orjson.loads(f.read())["data"])
 
             # Load the images
-            if cur_images_path != "":
-                assert os.path.exists(cur_images_path), f"Error: The local images_path {cur_images_path} not exists!"
-                with open(cur_images_path, "rb") as f:
-                    if self.images == {}:
-                        self.images = orjson.loads(f.read())
-                    else:
-                        self.images.update(orjson.loads(f.read()))
+            # if cur_images_path != "":
+            # check if file is larger than 100GB
+            # use ijson for large files
+            with open(cur_images_path, "rb") as f:
+                for key, value in ijson.kvitems(f, ""):
+                    self.images[key] = value
+            #     with open(cur_images_path, "rb") as f:
+            #         if not self.images:
+            #             self.images = orjson.loads(f.read())
+            #         else:
+            #             self.images.update(orjson.loads(f.read()))
 
             # Load the train_config
             if cur_train_config_path != "":
-                assert os.path.exists(cur_train_config_path), f"Error: The local train_config_path {cur_train_config_path} not exists!"
+                assert os.path.exists(
+                    cur_train_config_path
+                ), f"Error: The local train_config_path {cur_train_config_path} not exists!"
                 with open(cur_train_config_path, "rb") as f:
                     cache_train_config = orjson.loads(f.read())
             else:
@@ -253,7 +264,9 @@ class MimicitDataset(Dataset):
         assert len(image_ids) == resample_frames
         return image_ids
 
-    def process_llavar(self, instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format="simple"):
+    def process_llavar(
+        self, instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format="simple"
+    ):
         patch_images = torch.tensor([])
         all_texts = ""
         all_instruction_ids = in_context_example_ids + [instruction_id]
@@ -288,7 +301,9 @@ class MimicitDataset(Dataset):
         patch_images = self.patch_resize_transform(cur_image).unsqueeze(0).unsqueeze(0)
         return patch_images, all_texts  # incontext_text, query_text
 
-    def process_llava(self, instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format="simple"):
+    def process_llava(
+        self, instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format="simple"
+    ):
         patch_images = torch.tensor([])
         all_texts = ""
         all_instruction_ids = in_context_example_ids + [instruction_id]
@@ -308,9 +323,7 @@ class MimicitDataset(Dataset):
                         cur_text = f"[INST]{cur_instruction}[/INST]<answer>{cur_answer}<|endofchunk|>"
                 elif inst_format == "idefics":
                     if idx == 0:
-                        cur_text = (
-                            f"User:<fake_token_around_image><image><fake_token_around_image> {cur_instruction} Assistant:<answer> {cur_answer}<|endofchunk|>"
-                        )
+                        cur_text = f"User:<fake_token_around_image><image><fake_token_around_image> {cur_instruction} Assistant:<answer> {cur_answer}<|endofchunk|>"
                     else:
                         cur_text = f"User: {cur_instruction} Assistant:<answer> {cur_answer}<|endofchunk|>"
                 elif inst_format == "simple":
@@ -354,7 +367,9 @@ class MimicitDataset(Dataset):
         # print(instruction_id, query_text, answer)
         return patch_images, all_texts  # incontext_text, query_text
 
-    def process_dense_caption(self, instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=32):
+    def process_dense_caption(
+        self, instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=32
+    ):
         patch_images = torch.tensor([])
         all_texts = ""
         all_instruction_ids = in_context_example_ids + [instruction_id]
@@ -383,7 +398,9 @@ class MimicitDataset(Dataset):
         patch_images = patch_images.unsqueeze(0)
         return patch_images, all_texts
 
-    def process_tv_caption(self, instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=16):
+    def process_tv_caption(
+        self, instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=16
+    ):
         patch_images = torch.tensor([])
         all_texts = ""
         all_instruction_ids = in_context_example_ids + [instruction_id]
@@ -493,7 +510,7 @@ class MimicitDataset(Dataset):
         all_texts = f"{incontext_text}{all_texts}"
         return patch_images, all_texts
 
-    def process_funqa(self, instruction_id, instruction, answer, image_ids, in_context_example_ids):
+    def process_funqa(self, instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=128):
         patch_images = torch.tensor([])
         all_texts = ""
         all_instruction_ids = in_context_example_ids + [instruction_id]
@@ -509,6 +526,7 @@ class MimicitDataset(Dataset):
         all_texts = f"<image>{all_texts}"
         # <image>User: {cur_incontext_instruction} GPT:<answer> {cur_incontext_answer}<|endofchunk|>User: {instruction} GPT:<answer> {answer}<|endofchunk|>
         # <image>User: what does the image describe? GPT: XXX <|endofchunk|>User: Do you think this image is funny GPT:<answer> YYY <|endofchunk|>
+        image_ids = self.resample_frames(image_ids, resample_frames)
         for cur_image_id in image_ids:
             cur_image = self.images[cur_image_id]
             cur_image = Image.open(BytesIO(base64.urlsafe_b64decode(cur_image))).convert("RGB")
@@ -521,7 +539,9 @@ class MimicitDataset(Dataset):
         patch_images = patch_images.unsqueeze(0)
         return patch_images, all_texts
 
-    def process_general_vqa(self, instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format="simple"):
+    def process_general_vqa(
+        self, instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format="simple"
+    ):
         patch_images = torch.tensor([])
         all_texts = ""
         all_instruction_ids = in_context_example_ids + [instruction_id]
@@ -598,31 +618,52 @@ class MimicitDataset(Dataset):
             self.train_config[cur_train_id],
         )
         inst_format = self.inst_format
+        resample_frames = self.resample_frames
         # except:
         #     import pdb;pdb.set_trace()
 
         # self.max_src_length = self.max_tgt_length = 256
 
         if cur_train_id.startswith("LA"):
-            patch_images, all_texts = self.process_llava(instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format=inst_format)
+            patch_images, all_texts = self.process_llava(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format=inst_format
+            )
         elif cur_train_id.startswith("DC"):
-            patch_images, all_texts = self.process_dense_caption(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_dense_caption(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=resample_frames
+            )
         elif cur_train_id.startswith("TVC"):
-            patch_images, all_texts = self.process_tv_caption(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_tv_caption(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=resample_frames
+            )
         elif cur_train_id.startswith("E4D"):
-            patch_images, all_texts = self.process_e4d(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_e4d(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=resample_frames
+            )
         elif cur_train_id.startswith("SD"):
-            patch_images, all_texts = self.process_spot_the_difference(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_spot_the_difference(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids
+            )
         elif cur_train_id.startswith("SN"):
-            patch_images, all_texts = self.process_scene_navigation(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_scene_navigation(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids
+            )
         elif cur_train_id.startswith("FunQA"):
-            patch_images, all_texts = self.process_funqa(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_funqa(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, resample_frames=resample_frames
+            )
         elif cur_train_id.startswith("LLAVAR"):
-            patch_images, all_texts = self.process_llavar(instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format=inst_format)
+            patch_images, all_texts = self.process_llavar(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format=inst_format
+            )
         elif cur_train_id.startswith("TXT"):
-            patch_images, all_texts = self.process_text_instruction(instruction_id, instruction, answer, image_ids, in_context_example_ids)
+            patch_images, all_texts = self.process_text_instruction(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids
+            )
         else:
-            patch_images, all_texts = self.process_general_vqa(instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format=inst_format)
+            patch_images, all_texts = self.process_general_vqa(
+                instruction_id, instruction, answer, image_ids, in_context_example_ids, inst_format=inst_format
+            )
 
         src_text = self.tokenizer(
             f"{all_texts}",
@@ -812,11 +853,15 @@ if __name__ == "__main__":
             else args.mimicit_text_path.split(",")
         )
         all_images_text_path = (
-            args.images_text_path.split(",") + args.past_images_text_path.split(",") if args.past_images_text_path != "" else args.images_text_path.split(",")
+            args.images_text_path.split(",") + args.past_images_text_path.split(",")
+            if args.past_images_text_path != ""
+            else args.images_text_path.split(",")
         )
         # all_train_text_config_path = args.train_config_text_path.split(",") + args.past_train_config_text_path.split(",") if args.past_train_config_text_path != "" else args.train_config_text_path.split(",")
         if args.past_mimicit_text_path != "":
-            it_status = ["new"] * len(args.mimicit_text_path.split(",")) + ["past"] * len(args.past_mimicit_text_path.split(","))
+            it_status = ["new"] * len(args.mimicit_text_path.split(",")) + ["past"] * len(
+                args.past_mimicit_text_path.split(",")
+            )
         else:
             it_status = ["new"] * len(args.mimicit_text_path.split(","))
 

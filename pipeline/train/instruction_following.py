@@ -468,6 +468,7 @@ def parse_args():
         help="the maximum target sequence length",
     )
     parser.add_argument("--patch-image-size", type=int, default=224)
+    parser.add_argument("--resample_frames", type=int, default=32)
     # this could potentially save 33GB of all model parameters for otter-9b, including the language and vision model.
     parser.add_argument("--save_hf_model", default=False, action="store_true")
     parser.add_argument(
