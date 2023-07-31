@@ -258,7 +258,7 @@ class MimicitDataset(Dataset):
     def set_epoch(self, epoch, **unused):
         self.epoch = epoch
 
-    def resample_frames(self, image_ids, resample_frames):
+    def resample_frames_fn(self, image_ids, resample_frames):
         indices = np.linspace(0, len(image_ids) - 1, resample_frames, dtype=int)
         image_ids = [image_ids[i] for i in indices]
         assert len(image_ids) == resample_frames
@@ -385,7 +385,7 @@ class MimicitDataset(Dataset):
         all_texts = f"<image>{all_texts}"
         # <image>User: {cur_incontext_instruction} GPT:<answer> {cur_incontext_answer}<|endofchunk|>User: {instruction} GPT:<answer> {answer}<|endofchunk|>
         # <image>User: what does the image describe? GPT: XXX <|endofchunk|>User: Do you think this image is funny GPT:<answer> YYY <|endofchunk|>
-        image_ids = self.resample_frames(image_ids, resample_frames)
+        image_ids = self.resample_frames_fn(image_ids, resample_frames)
         for cur_image_id in image_ids:
             cur_image = self.images[cur_image_id]
             cur_image = Image.open(BytesIO(base64.urlsafe_b64decode(cur_image))).convert("RGB")
@@ -418,7 +418,7 @@ class MimicitDataset(Dataset):
         # <image>User: what does the image describe? GPT: XXX <|endofchunk|>User: Do you think this image is funny GPT:<answer> YYY <|endofchunk|>
 
         # make sure the frames are evenly sampled to certain number to enable batch processing
-        image_ids = self.resample_frames(image_ids, resample_frames)
+        image_ids = self.resample_frames_fn(image_ids, resample_frames)
         for cur_image_id in image_ids:
             cur_image = self.images[cur_image_id]
             cur_image = Image.open(BytesIO(base64.urlsafe_b64decode(cur_image))).convert("RGB")
@@ -448,7 +448,7 @@ class MimicitDataset(Dataset):
         # <image>User: {cur_incontext_instruction} GPT:<answer> {cur_incontext_answer}<|endofchunk|>User: {instruction} GPT:<answer> {answer}<|endofchunk|>
         # <image>User: what does the image describe? GPT: XXX <|endofchunk|>User: Do you think this image is funny GPT:<answer> YYY <|endofchunk|>
         # make sure the frames are evenly sampled to certain number to enable batch processing
-        image_ids = self.resample_frames(image_ids, resample_frames)
+        image_ids = self.resample_frames_fn(image_ids, resample_frames)
         for cur_image_id in image_ids:
             cur_image = self.images[cur_image_id]
             cur_image = Image.open(BytesIO(base64.urlsafe_b64decode(cur_image))).convert("RGB")
@@ -526,7 +526,7 @@ class MimicitDataset(Dataset):
         all_texts = f"<image>{all_texts}"
         # <image>User: {cur_incontext_instruction} GPT:<answer> {cur_incontext_answer}<|endofchunk|>User: {instruction} GPT:<answer> {answer}<|endofchunk|>
         # <image>User: what does the image describe? GPT: XXX <|endofchunk|>User: Do you think this image is funny GPT:<answer> YYY <|endofchunk|>
-        image_ids = self.resample_frames(image_ids, resample_frames)
+        image_ids = self.resample_frames_fn(image_ids, resample_frames)
         for cur_image_id in image_ids:
             cur_image = self.images[cur_image_id]
             cur_image = Image.open(BytesIO(base64.urlsafe_b64decode(cur_image))).convert("RGB")
