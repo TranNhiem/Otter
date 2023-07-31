@@ -21,13 +21,19 @@ from transformers import (
 
 import wandb
 import deepspeed
-from flamingo.configuration_flamingo import FlamingoConfig
 from flamingo.modeling_flamingo import FlamingoForConditionalGeneration
 from otter.modeling_otter import OtterForConditionalGeneration
 from pipeline.train.data import get_data
 from pipeline.train.distributed import world_info_from_env
-from pipeline.train.train_utils import AverageMeter, get_checkpoint, get_image_attention_mask
-from transformers import IdeficsForVisionText2Text, AutoProcessor
+from pipeline.train.train_utils import (
+    AverageMeter,
+    get_checkpoint,
+    get_checkpoint_deepspeed_zero3,
+    get_image_attention_mask,
+)
+from transformers import IdeficsForVisionText2Text, AutoProcessor, AutoConfig
+
+import deepspeed
 
 # This is for MPT series model.
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -46,7 +52,9 @@ def random_seed(seed=42, rank=0):
     random.seed(seed + rank)
 
 
-def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, lr_scheduler, device_id, accelerator, wandb):
+def train_one_epoch(
+    args, model, epoch, mimicit_loaders, tokenizer, optimizer, lr_scheduler, device_id, accelerator, wandb
+):
     num_batches_per_epoch = len(mimicit_loaders[0])
     total_training_steps = num_batches_per_epoch * args.num_epochs
 
@@ -58,7 +66,9 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
 
     # setup logging
     step_time_m = AverageMeter()  # time for one optimizer step (> 1 batch if using gradient accum)
-    data_time_m = AverageMeter()  # avg time to load one batch of both C4 AND laion (= 1 batch regardless of gradient accum)
+    data_time_m = (
+        AverageMeter()
+    )  # avg time to load one batch of both C4 AND laion (= 1 batch regardless of gradient accum)
     end = time.time()
     dtype = accelerator.unwrap_model(model).dtype
     print(f"Using dtype {dtype}")
@@ -74,6 +84,7 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
 
         global_step = num_steps + epoch * num_batches_per_epoch
         #### MIMIC-IT FORWARD PASS ####
+
         total_losses = []
         for batch_mimicit in batch_mimicits:
             images = batch_mimicit["net_input"]["patch_images"].to(device_id, non_blocking=True)
@@ -123,6 +134,7 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
                     max_num_images = images.shape[1]
                     image_attention_mask = get_image_attention_mask(input_ids, max_num_images, tokenizer)
                     assert images.shape[1] == 1, "The second dimension is not 1"
+                    # import pdb;pdb.set_trace()
                     loss_mimicit = model(
                         pixel_values=images.squeeze(1).to(dtype),
                         input_ids=input_ids,
@@ -156,13 +168,13 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
                 # zero_mask[endofchunk_token_id] = torch.ones_like(zero_mask[endofchunk_token_id])
                 m.weight.grad = m.weight.grad * zero_mask
 
-        if args.mask_lm_head:
+        if args.mask_lm_head and args.distributed_type != "DEEPSPEED":
             unwrapped_model = accelerator.unwrap_model(model)
             if isinstance(unwrapped_model, IdeficsForVisionText2Text):
                 unwrapped_model.lm_head.apply(mask_embedding)
             elif unwrapped_model.lang_encoder.__class__.__name__ in ["MPTForCausalLM", "MosaicGPT"]:
                 unwrapped_model.lang_encoder.transformer.wte.apply(mask_embedding)
-            elif unwrapped_model.lang_encoder.__class__.__name__ == "LlamaForCausalLM":
+            elif "LlamaForCausalLM" in unwrapped_model.lang_encoder.__class__.__name__:
                 unwrapped_model.lang_encoder.model.embed_tokens.apply(mask_embedding)
                 unwrapped_model.lang_encoder.lm_head.apply(mask_embedding)
 
@@ -180,8 +192,12 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
         if accelerator.sync_gradients:
             if args.rank == 0 and args.report_to_wandb:
                 # compute within rank 0
-                mimicit_samples_per_second = args.gradient_accumulation_steps * args.batch_size * args.world_size / step_time_m.val
-                mimicit_samples_per_second_per_gpu = args.gradient_accumulation_steps * args.batch_size / step_time_m.val
+                mimicit_samples_per_second = (
+                    args.gradient_accumulation_steps * args.batch_size * args.world_size / step_time_m.val
+                )
+                mimicit_samples_per_second_per_gpu = (
+                    args.gradient_accumulation_steps * args.batch_size / step_time_m.val
+                )
 
                 wandb.log(
                     {
@@ -206,9 +222,33 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
                 torch.cuda.empty_cache()
                 gc.collect()  # forces garbage collection
 
+            if (
+                args.rank == 0
+                and global_step != 0
+                and (args.save_steps_interval != -1)
+                and (global_step % args.save_steps_interval == 0)
+            ):
+                if not os.path.exists(args.external_save_dir):
+                    os.makedirs(args.external_save_dir)
+
+                unwrapped_model = accelerator.unwrap_model(model)
+                checkpoint_dict = {
+                    "steps": global_step,
+                    "model_state_dict": get_checkpoint(unwrapped_model),
+                }
+                print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_steps_{global_step}.pt")
+                accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_steps_{global_step}.pt")
+                if args.delete_previous_checkpoint:
+                    if epoch > 0 and os.path.exists(
+                        f"{args.external_save_dir}/checkpoint_step_{global_step-args.save_steps_interval}.pt"
+                    ):
+                        os.remove(f"{args.external_save_dir}/checkpoint_step_{global_step-args.save_steps_interval}.pt")
+
         # Log loss to console
         if ((num_steps + 1) % args.logging_steps == 0) and args.rank == 0:
-            print(f"Step {num_steps+1}/{num_batches_per_epoch} of epoch {epoch+1}/{args.num_epochs} complete. Loss MIMIC-IT: {mean_loss.item():.3f}")
+            print(
+                f"Step {num_steps+1}/{num_batches_per_epoch} of epoch {epoch+1}/{args.num_epochs} complete. Loss MIMIC-IT: {mean_loss.item():.3f}"
+            )
 
 
 def parse_args():
@@ -376,6 +416,7 @@ def parse_args():
     )
 
     # optimizer args
+    parser.add_argument("--gradient_checkpointing", action="store_true")
     parser.add_argument("--offline", action="store_true")
     parser.add_argument("--num_epochs", type=int, default=1)
     parser.add_argument("--logging_steps", type=int, default=100, help="log loss every n steps")
@@ -384,10 +425,17 @@ def parse_args():
     parser.add_argument("--train_num_samples", type=int, default=-1)
 
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1)
+    parser.add_argument("--save_steps_interval", type=int, default=-1)
     parser.add_argument(
         "--pretrained_model_name_or_path",
         type=str,
         help="path to huggingface model or model identifier from local path or huggingface.co",
+        default=None,
+    )
+    parser.add_argument(
+        "--trained_ckpt",
+        type=str,
+        help="path to trained_ckpt",
         default=None,
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -439,7 +487,12 @@ def parse_args():
     parser.add_argument("--patch-image-size", type=int, default=224)
     # this could potentially save 33GB of all model parameters for otter-9b, including the language and vision model.
     parser.add_argument("--save_hf_model", default=False, action="store_true")
-    parser.add_argument("--customized_config", default=None, type=str, help="path to customized additional config.json, use to modify from the original config.json in pretrained model.")
+    parser.add_argument(
+        "--customized_config",
+        default=None,
+        type=str,
+        help="path to customized additional config.json, use to modify from the original config.json in pretrained model.",
+    )
     # wandb args
     parser.add_argument("--report_to_wandb", default=False, action="store_true")
     parser.add_argument(
@@ -471,14 +524,6 @@ def parse_args():
     # parser = add_data_args(parser)
     args = parser.parse_args()
 
-    if args.save_checkpoints_to_wandb and not args.report_to_wandb:
-        raise ValueError("save_checkpoints_to_wandb requires report_to_wandb")
-
-    if args.offline:
-        os.environ["WANDB_MODE"] = "offline"
-        os.environ["TRANSFORMERS_OFFLINE"] = "1"
-
-    args.local_rank, args.rank, args.world_size = world_info_from_env()
     # Check for argument consistency and set environment variables if needed
     if args.save_checkpoints_to_wandb and not args.report_to_wandb:
         raise ValueError("save_checkpoints_to_wandb requires report_to_wandb")
@@ -487,7 +532,18 @@ def parse_args():
         os.environ["WANDB_MODE"] = "offline"
         os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
+    # import pdb;pdb.set_trace()
     args.local_rank, args.rank, args.world_size = world_info_from_env()
+
+    # if "COUNT_NODE" in os.environ:
+    #     args.num_machines = int(os.environ["COUNT_NODE"])
+    # else:
+    #     args.num_machines = 1
+
+    # if "THEID" in os.environ:
+    #     args.machine_rank = int(os.environ["THEID"])
+    # else:
+    #     args.machine_rank = 0
 
     # Seed for reproducibility
     random_seed(args.seed)
@@ -505,10 +561,14 @@ def main():
 
     if args.pretrained_model_name_or_path is not None:
         accelerator.print(f"Loading pretrained model from {args.pretrained_model_name_or_path}")
-        device_map = {"": device_id} if accelerator.distributed_type == "MULTI_GPU" or accelerator.distributed_type == "DEEPSPEED" else "auto"
+        device_map = (
+            {"": device_id}
+            if accelerator.distributed_type == "MULTI_GPU" or accelerator.distributed_type == "DEEPSPEED"
+            else "auto"
+        )
         kwargs = {"local_files_only": args.offline, "device_map": device_map}
         if args.customized_config is not None:
-            kwargs['config'] = args.customized_config
+            kwargs["config"] = args.customized_config
         if "otter" in args.model_name.lower():
             model = OtterForConditionalGeneration.from_pretrained(
                 args.pretrained_model_name_or_path,
@@ -530,23 +590,47 @@ def main():
         elif "idefics" in args.model_name.lower():
             if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
                 kwargs.pop("device_map")
+            # import pdb;pdb.set_trace()
             model = IdeficsForVisionText2Text.from_pretrained(
                 args.pretrained_model_name_or_path,
                 **kwargs,
             )
-            named_parameters = dict(model.named_parameters())
-            params_to_gather = [named_parameters[k] for k in named_parameters.keys()]
-            if len(params_to_gather) > 0:
-                with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
-                    if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
-                        print(f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B")
+            if args.gradient_checkpointing:
+                model.gradient_checkpointing_enable()
 
+            # named_parameters = dict(model.named_parameters())
+            # params_to_gather = [named_parameters[k] for k in named_parameters.keys()]
+            # if len(params_to_gather) > 0:
+            if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
+                params_to_gather = [p for name, p in model.named_parameters() if p.requires_grad]
+                with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
+                    if torch.distributed.get_rank() == 0:
+                        # 有参数
+                        print(
+                            device_id,
+                            f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B",
+                        )
+
+            print(
+                device_id,
+                f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B",
+            )
             processor = AutoProcessor.from_pretrained(args.pretrained_model_name_or_path, legacy=False)
             past_special_tokens = processor.tokenizer.special_tokens_map["additional_special_tokens"]
-            processor.tokenizer.add_special_tokens({"additional_special_tokens": ["<answer>", "<|endofchunk|>"] + past_special_tokens})
+            processor.tokenizer.add_special_tokens(
+                {"additional_special_tokens": ["<answer>", "<|endofchunk|>"] + past_special_tokens}
+            )
             image_processor = processor.image_processor
             tokenizer = processor.tokenizer
             model.resize_token_embeddings(len(tokenizer))
+
+    if args.trained_ckpt is not None:
+        train_ckpt = torch.load(args.trained_ckpt, map_location="cpu")
+        if train_ckpt.get("model_state_dict", None) is not None:
+            train_ckpt = train_ckpt["model_state_dict"]
+        _ = model.load_state_dict(train_ckpt, strict=False)
+        print(_[1])
+        # import pdb;pdb.set_trace()
 
     accelerator.wait_for_everyone()
 
@@ -567,7 +651,13 @@ def main():
         params_with_wd, params_without_wd = [], []
 
         def apply_decay(x):
-            return "gated_cross_attn_layer" in x and "ff_gate" not in x and "attn_gate" not in x and "norm" not in x and "bias" not in x
+            return (
+                "gated_cross_attn_layer" in x
+                and "ff_gate" not in x
+                and "attn_gate" not in x
+                and "norm" not in x
+                and "bias" not in x
+            )
 
         for n, p in model.named_parameters():
             # if p.requires_grad:
@@ -585,7 +675,9 @@ def main():
 
     resume_from_epoch = 0
     # check if a checkpoint exists for this run
-    args.external_save_dir = os.path.join(args.external_save_dir, args.run_name) if args.external_save_dir else args.run_name
+    args.external_save_dir = (
+        os.path.join(args.external_save_dir, args.run_name) if args.external_save_dir else args.run_name
+    )
     if os.path.exists(f"{args.external_save_dir}") and args.resume_from_checkpoint is True:
         checkpoint_list = glob.glob(f"{args.external_save_dir}/checkpoint_*.pt")
         if len(checkpoint_list) == 0:
@@ -607,25 +699,21 @@ def main():
     if args.rank == 0:
         print(f"Total training steps: {total_training_steps}")
 
-    args.warmup_steps = total_training_steps * args.warmup_steps_ratio if args.warmup_steps_ratio is not None else args.warmup_steps
-
-    num_warmup_steps = args.warmup_steps // args.gradient_accumulation_steps
-    num_training_steps = total_training_steps // args.gradient_accumulation_steps
-    if accelerator.distributed_type == "DEEPSPEED":
-        num_training_steps = num_training_steps * accelerator.num_processes
-        num_warmup_steps = num_warmup_steps * accelerator.num_processes
+    args.warmup_steps = (
+        total_training_steps * args.warmup_steps_ratio if args.warmup_steps_ratio is not None else args.warmup_stepsps
+    )
 
     if args.lr_scheduler == "linear":
         lr_scheduler = get_linear_schedule_with_warmup(
             optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
+            num_warmup_steps=args.warmup_steps // args.gradient_accumulation_steps,
+            num_training_steps=total_training_steps // args.gradient_accumulation_steps,
         )
     elif args.lr_scheduler == "cosine":
         lr_scheduler = get_cosine_schedule_with_warmup(
             optimizer,
-            num_warmup_steps=num_warmup_steps,
-            num_training_steps=num_training_steps,
+            num_warmup_steps=args.warmup_steps // args.gradient_accumulation_steps,
+            num_training_steps=total_training_steps // args.gradient_accumulation_steps,
         )
     else:
         lr_scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps)
@@ -638,7 +726,13 @@ def main():
             config=vars(args),
         )
 
-    model, optimizer, lr_scheduler, mimicit_loaders = accelerator.prepare(model, optimizer, lr_scheduler, mimicit_loaders)
+    if accelerator.distributed_type == "DEEPSPEED" or accelerator.distributed_type == "MULTI_GPU":
+        model, optimizer = accelerator.prepare(model, optimizer)
+    else:
+        model, optimizer, lr_scheduler, mimicit_loaders = accelerator.prepare(
+            model, optimizer, lr_scheduler, mimicit_loaders
+        )
+
     model.train()
 
     for epoch in range(resume_from_epoch, args.num_epochs):
@@ -659,44 +753,77 @@ def main():
         )
         accelerator.wait_for_everyone()
 
+        if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
+            # trainable_state_dict = {}
+            unwrapped_model = accelerator.unwrap_model(model)
+            params_to_gather = [p for name, p in unwrapped_model.named_parameters() if p.requires_grad]
+            with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
+                if args.rank == 0:
+                    trainable_state_dict = {}
+                    index = 0
+                    for name, p in unwrapped_model.named_parameters():
+                        if p.requires_grad:
+                            trainable_state_dict[name] = params_to_gather[index].data
+                            index += 1
+                    print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+                    accelerator.save(trainable_state_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+                    # save the config
+                    unwrapped_model.config.save_pretrained(args.external_save_dir)
+                    if args.delete_previous_checkpoint:
+                        if epoch > 0:
+                            os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+
+                    del trainable_state_dict
+                    del params_to_gather
+                    del unwrapped_model
+        else:
+            if args.rank == 0:
+                if not os.path.exists(args.external_save_dir):
+                    os.makedirs(args.external_save_dir)
+
+                unwrapped_model = accelerator.unwrap_model(model)
+                # checkpoint_dict = {
+                #     "epoch": epoch,
+                #     "model_state_dict": get_checkpoint(unwrapped_model),
+                #     "optimizer_state_dict": optimizer.state_dict(),
+                #     "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+                # }
+
+                checkpoint_dict = {
+                    "model_state_dict": get_checkpoint(unwrapped_model),
+                }
+
+                # import pdb;pdb.set_trace()
+                print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+                accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+                # save the config
+                unwrapped_model.config.save_pretrained(args.external_save_dir)
+                if args.delete_previous_checkpoint:
+                    if epoch > 0:
+                        os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+
+        accelerator.wait_for_everyone()
+
+    accelerator.wait_for_everyone()
+    if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
+        pass
+    else:
         if args.rank == 0:
             if not os.path.exists(args.external_save_dir):
                 os.makedirs(args.external_save_dir)
 
             unwrapped_model = accelerator.unwrap_model(model)
-            checkpoint_dict = {
-                "epoch": epoch,
-                "model_state_dict": get_checkpoint(unwrapped_model),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-            }
-            print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
-            accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+            accelerator.save(
+                get_checkpoint(model=unwrapped_model),
+                f"{args.external_save_dir}/final_weights.pt",
+            )
             # save the config
             unwrapped_model.config.save_pretrained(args.external_save_dir)
-            if args.delete_previous_checkpoint:
-                if epoch > 0:
-                    os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
 
-        accelerator.wait_for_everyone()
-
-    accelerator.wait_for_everyone()
-    if args.rank == 0:
-        if not os.path.exists(args.external_save_dir):
-            os.makedirs(args.external_save_dir)
-
-        unwrapped_model = accelerator.unwrap_model(model)
-        accelerator.save(
-            get_checkpoint(model=unwrapped_model),
-            f"{args.external_save_dir}/final_weights.pt",
-        )
-        # save the config
-        unwrapped_model.config.save_pretrained(args.external_save_dir)
-
-        if args.report_to_wandb and args.save_checkpoints_to_wandb:
-            wandb.save(f"{args.external_save_dir}/final_weights.pt")
-        if args.save_hf_model:
-            unwrapped_model.save_pretrained(f"{args.external_save_dir}")
+            if args.report_to_wandb and args.save_checkpoints_to_wandb:
+                wandb.save(f"{args.external_save_dir}/final_weights.pt")
+            if args.save_hf_model:
+                unwrapped_model.save_pretrained(f"{args.external_save_dir}")
 
 
 if __name__ == "__main__":
