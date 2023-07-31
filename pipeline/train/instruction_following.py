@@ -536,7 +536,7 @@ def main():
             params_to_gather = [named_parameters[k] for k in named_parameters.keys()]
             if len(params_to_gather) > 0:
                 with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
-                    if torch.distributed.get_rank() == 0:
+                    if torch.distributed.is_initialized() and torch.distributed.get_rank() == 0:
                         print(f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B")
 
             processor = AutoProcessor.from_pretrained(args.pretrained_model_name_or_path, legacy=False)
