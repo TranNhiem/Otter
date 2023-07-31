@@ -143,7 +143,7 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
             unwrapped_model = accelerator.unwrap_model(model)
             if "MPTForCausalLM" in unwrapped_model.lang_encoder.__class__.__name__ or "MosaicGPT" in unwrapped_model.lang_encoder.__class__.__name__:
                 unwrapped_model.lang_encoder.transformer.wte.apply(mask_embedding)
-            elif "LlamaForCausalLM" in unwrapped_model.lang_encoder.__class__.__name__ :
+            elif "LlamaForCausalLM" in unwrapped_model.lang_encoder.__class__.__name__:
                 unwrapped_model.lang_encoder.model.embed_tokens.apply(mask_embedding)
                 unwrapped_model.lang_encoder.lm_head.apply(mask_embedding)
 
@@ -184,7 +184,7 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
                     },
                     commit=True,
                 )
-            
+
             if args.rank == 0 and global_step != 0 and (args.save_steps_interval != -1) and (global_step % args.save_steps_interval == 0):
                 if not os.path.exists(args.external_save_dir):
                     os.makedirs(args.external_save_dir)
@@ -528,7 +528,7 @@ def main():
                 torch.load(args.load_from_original_checkpoint, map_location="cpu"),
                 False,
             )
-    
+
     if args.trained_ckpt is not None:
         train_ckpt = torch.load(args.trained_ckpt, map_location="cpu")
         if train_ckpt.get("model_state_dict", None) is not None:
