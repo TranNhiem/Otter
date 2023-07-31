@@ -29,6 +29,7 @@ from pipeline.train.distributed import world_info_from_env
 from pipeline.train.train_utils import AverageMeter, get_checkpoint, get_image_attention_mask
 from transformers import IdeficsForVisionText2Text, AutoProcessor
 
+# This is for MPT series model.
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
@@ -438,6 +439,7 @@ def parse_args():
     parser.add_argument("--patch-image-size", type=int, default=224)
     # this could potentially save 33GB of all model parameters for otter-9b, including the language and vision model.
     parser.add_argument("--save_hf_model", default=False, action="store_true")
+    parser.add_argument("--customized_config", default=None, type=str, help="path to customized additional config.json, use to modify from the original config.json in pretrained model.")
     # wandb args
     parser.add_argument("--report_to_wandb", default=False, action="store_true")
     parser.add_argument(
@@ -504,11 +506,13 @@ def main():
     if args.pretrained_model_name_or_path is not None:
         accelerator.print(f"Loading pretrained model from {args.pretrained_model_name_or_path}")
         device_map = {"": device_id} if accelerator.distributed_type == "MULTI_GPU" or accelerator.distributed_type == "DEEPSPEED" else "auto"
+        kwargs = {"local_files_only": args.offline, "device_map": device_map}
+        if args.customized_config is not None:
+            kwargs['config'] = args.customized_config
         if "otter" in args.model_name.lower():
             model = OtterForConditionalGeneration.from_pretrained(
                 args.pretrained_model_name_or_path,
-                device_map=device_map,
-                local_files_only=args.offline,
+                **kwargs,
             )
             args.tokenizer = model.text_tokenizer
             tokenizer = model.text_tokenizer
@@ -516,8 +520,7 @@ def main():
         elif "flamingo" in args.model_name.lower():
             model = FlamingoForConditionalGeneration.from_pretrained(
                 args.pretrained_model_name_or_path,
-                device_map=device_map,
-                local_files_only=args.offline,
+                **kwargs,
             )
             # add special tokens for instruction tuning
             model.text_tokenizer.add_special_tokens({"additional_special_tokens": ["<answer>"]})
@@ -525,7 +528,6 @@ def main():
             tokenizer = model.text_tokenizer
             image_processor = CLIPImageProcessor()
         elif "idefics" in args.model_name.lower():
-            kwargs = {"local_files_only": args.offline, "device_map": device_map}
             if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
                 kwargs.pop("device_map")
             model = IdeficsForVisionText2Text.from_pretrained(
