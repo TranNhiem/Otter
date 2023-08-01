@@ -86,6 +86,8 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
             images = batch_mimicit["net_input"]["patch_images"].to(device_id, non_blocking=True)
             input_ids = batch_mimicit["net_input"]["input_ids"].to(device_id, non_blocking=True)
             attention_mask = batch_mimicit["net_input"]["attention_masks"].to(device_id, non_blocking=True)
+            # compute total_input_tokens
+            total_input_tokens = input_ids.size(1)  # get the size of the second dimension
 
             labels = input_ids.clone()
             labels[labels == tokenizer.pad_token_id] = -100
@@ -198,6 +200,7 @@ def train_one_epoch(args, model, epoch, mimicit_loaders, tokenizer, optimizer, l
                         "mimicit_samples_per_second": mimicit_samples_per_second,
                         "mimicit_samples_per_second_per_gpu": mimicit_samples_per_second_per_gpu,
                         "lr": optimizer.param_groups[0]["lr"],
+                        "total_input_tokens": total_input_tokens,
                     },
                     commit=False,
                 )
