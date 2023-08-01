@@ -663,9 +663,11 @@ def main():
             print(f"Loading checkpoint from {resume_from_checkpoint_path}")
         checkpoint = torch.load(resume_from_checkpoint_path, map_location="cpu")
         model.load_state_dict(checkpoint["model_state_dict"], False)
-        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
-        lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
-        resume_from_epoch = checkpoint["epoch"] + 1
+        if "optimizer_state_dict" in checkpoint:
+            # resume with state dict.
+            optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+            lr_scheduler.load_state_dict(checkpoint["lr_scheduler_state_dict"])
+            resume_from_epoch = checkpoint["epoch"] + 1
 
     optimizer = torch.optim.AdamW(get_grouped_params(model), lr=args.learning_rate)
 
