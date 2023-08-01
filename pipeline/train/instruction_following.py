@@ -25,12 +25,7 @@ from flamingo.modeling_flamingo import FlamingoForConditionalGeneration
 from otter.modeling_otter import OtterForConditionalGeneration
 from pipeline.train.data import get_data
 from pipeline.train.distributed import world_info_from_env
-from pipeline.train.train_utils import (
-    AverageMeter,
-    get_checkpoint,
-    get_checkpoint_deepspeed_zero3,
-    get_image_attention_mask,
-)
+from pipeline.train.train_utils import AverageMeter, get_checkpoint, get_checkpoint_deepspeed_zero3, get_image_attention_mask
 from transformers import IdeficsForVisionText2Text, AutoProcessor, AutoConfig
 
 import deepspeed
@@ -593,11 +588,11 @@ def main():
                             device_id,
                             f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B",
                         )
-
-            print(
-                device_id,
-                f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B",
-            )
+            else:
+                print(
+                    device_id,
+                    f"IDEFICS Trainable Params: {(sum(p.numel() for p in model.parameters() if p.requires_grad)) / 1e9:.3f} B",
+                )
             processor = AutoProcessor.from_pretrained(args.pretrained_model_name_or_path, legacy=False)
             past_special_tokens = processor.tokenizer.special_tokens_map["additional_special_tokens"]
             processor.tokenizer.add_special_tokens({"additional_special_tokens": ["<answer>", "<|endofchunk|>"] + past_special_tokens})
@@ -611,7 +606,6 @@ def main():
             train_ckpt = train_ckpt["model_state_dict"]
         _ = model.load_state_dict(train_ckpt, strict=False)
         print(_[1])
-        # import pdb;pdb.set_trace()
 
     accelerator.wait_for_everyone()
 
@@ -689,7 +683,7 @@ def main():
             num_training_steps=total_training_steps // args.gradient_accumulation_steps,
         )
     else:
-        lr_scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=num_warmup_steps)
+        lr_scheduler = get_constant_schedule_with_warmup(optimizer, num_warmup_steps=args.warmup_steps // args.gradient_accumulation_steps)
 
     if args.rank == 0 and args.report_to_wandb:
         wandb.init(
@@ -724,8 +718,11 @@ def main():
         )
         accelerator.wait_for_everyone()
 
+        if args.rank == 0:
+            if not os.path.exists(args.external_save_dir):
+                os.makedirs(args.external_save_dir)
+                
         if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
-            # trainable_state_dict = {}
             unwrapped_model = accelerator.unwrap_model(model)
             params_to_gather = [p for name, p in unwrapped_model.named_parameters() if p.requires_grad]
             with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
@@ -748,25 +745,20 @@ def main():
                     del params_to_gather
                     del unwrapped_model
         else:
-            if args.rank == 0:
-                if not os.path.exists(args.external_save_dir):
-                    os.makedirs(args.external_save_dir)
-
-                unwrapped_model = accelerator.unwrap_model(model)
-                checkpoint_dict = {
-                    "epoch": epoch,
-                    "model_state_dict": get_checkpoint(unwrapped_model),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-                }
-
-                print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
-                accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
-                # save the config
-                unwrapped_model.config.save_pretrained(args.external_save_dir)
-                if args.delete_previous_checkpoint:
-                    if epoch > 0:
-                        os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+            unwrapped_model = accelerator.unwrap_model(model)
+            checkpoint_dict = {
+                "epoch": epoch,
+                "model_state_dict": get_checkpoint(unwrapped_model),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+            }
+            print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+            accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+            # save the config
+            unwrapped_model.config.save_pretrained(args.external_save_dir)
+            if args.delete_previous_checkpoint:
+                if epoch > 0:
+                    os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
 
         accelerator.wait_for_everyone()
 
