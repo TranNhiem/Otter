@@ -720,7 +720,7 @@ def main():
 
         if args.rank == 0:
             if not os.path.exists(args.external_save_dir):
-                os.makedirs(args.external_save_dir)                
+                os.makedirs(args.external_save_dir)
             if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
                 unwrapped_model = accelerator.unwrap_model(model)
                 params_to_gather = [p for name, p in unwrapped_model.named_parameters() if p.requires_grad]
