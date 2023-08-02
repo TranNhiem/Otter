@@ -720,45 +720,44 @@ def main():
 
         if args.rank == 0:
             if not os.path.exists(args.external_save_dir):
-                os.makedirs(args.external_save_dir)
-                
-        if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
-            unwrapped_model = accelerator.unwrap_model(model)
-            params_to_gather = [p for name, p in unwrapped_model.named_parameters() if p.requires_grad]
-            with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
-                if args.rank == 0:
-                    trainable_state_dict = {}
-                    index = 0
-                    for name, p in unwrapped_model.named_parameters():
-                        if p.requires_grad:
-                            trainable_state_dict[name] = params_to_gather[index].data
-                            index += 1
-                    print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
-                    accelerator.save(trainable_state_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
-                    # save the config
-                    unwrapped_model.config.save_pretrained(args.external_save_dir)
-                    if args.delete_previous_checkpoint:
-                        if epoch > 0:
-                            os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+                os.makedirs(args.external_save_dir)                
+            if accelerator.distributed_type == "DEEPSPEED" and accelerator.state.deepspeed_plugin.zero_stage == 3:
+                unwrapped_model = accelerator.unwrap_model(model)
+                params_to_gather = [p for name, p in unwrapped_model.named_parameters() if p.requires_grad]
+                with deepspeed.zero.GatheredParameters(params_to_gather, modifier_rank=0):
+                    if args.rank == 0:
+                        trainable_state_dict = {}
+                        index = 0
+                        for name, p in unwrapped_model.named_parameters():
+                            if p.requires_grad:
+                                trainable_state_dict[name] = params_to_gather[index].data
+                                index += 1
+                        print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+                        accelerator.save(trainable_state_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+                        # save the config
+                        unwrapped_model.config.save_pretrained(args.external_save_dir)
+                        if args.delete_previous_checkpoint:
+                            if epoch > 0:
+                                os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
 
-                    del trainable_state_dict
-                    del params_to_gather
-                    del unwrapped_model
-        else:
-            unwrapped_model = accelerator.unwrap_model(model)
-            checkpoint_dict = {
-                "epoch": epoch,
-                "model_state_dict": get_checkpoint(unwrapped_model),
-                "optimizer_state_dict": optimizer.state_dict(),
-                "lr_scheduler_state_dict": lr_scheduler.state_dict(),
-            }
-            print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
-            accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
-            # save the config
-            unwrapped_model.config.save_pretrained(args.external_save_dir)
-            if args.delete_previous_checkpoint:
-                if epoch > 0:
-                    os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
+                        del trainable_state_dict
+                        del params_to_gather
+                        del unwrapped_model
+            else:
+                unwrapped_model = accelerator.unwrap_model(model)
+                checkpoint_dict = {
+                    "epoch": epoch,
+                    "model_state_dict": get_checkpoint(unwrapped_model),
+                    "optimizer_state_dict": optimizer.state_dict(),
+                    "lr_scheduler_state_dict": lr_scheduler.state_dict(),
+                }
+                print(f"Saving checkpoint to {args.external_save_dir}/checkpoint_{epoch}.pt")
+                accelerator.save(checkpoint_dict, f"{args.external_save_dir}/checkpoint_{epoch}.pt")
+                # save the config
+                unwrapped_model.config.save_pretrained(args.external_save_dir)
+                if args.delete_previous_checkpoint:
+                    if epoch > 0:
+                        os.remove(f"{args.external_save_dir}/checkpoint_{epoch-1}.pt")
 
         accelerator.wait_for_everyone()
 
