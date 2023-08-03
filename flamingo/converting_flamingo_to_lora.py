@@ -2,7 +2,7 @@ import argparse
 import torch
 import sys
 
-from modeling_otter import OtterForConditionalGeneration
+from .modeling_flamingo import FlamingoForConditionalGeneration
 from peft import get_peft_model, LoraConfig, TaskType
 
 MODEL_CLASSES = {
@@ -21,20 +21,26 @@ parser.add_argument(
     "--checkpoint_path",
     type=str,
     help="Path to the pre-trained model checkpoint.",
-    default="/data/bli/checkpoints/OTTER-MPT7B-Instruct0705",
+    default="",
 )
 parser.add_argument(
     "--save_path",
     type=str,
-    default="/data/bli/checkpoints/OTTER-MPT7B-Instruct0705-LoRA",
+    default="",
     help="Path to the converted model checkpoint.",
 )
 
 # Parse the input arguments
 args = parser.parse_args()
 
+load_bit = "bf16"
+if load_bit == "fp16":
+    precision = {"torch_dtype": torch.float16}
+elif load_bit == "bf16":
+    precision = {"torch_dtype": torch.bfloat16}
+
 # Load the model
-model = OtterForConditionalGeneration.from_pretrained(args.checkpoint_path, device_map="auto")
+model = FlamingoForConditionalGeneration.from_pretrained(args.checkpoint_path, device_map="auto", **precision)
 
 # adding lora
 standard_modules = ["q_proj", "v_proj"]
@@ -55,7 +61,8 @@ lora_config = LoraConfig(
 )
 model.config.update({"lora_config": {"r": 16, "lora_alpha": 32, "lora_dropout": 0.05}})
 model.lang_encoder = get_peft_model(model.lang_encoder, lora_config)
+model.lang_encoder.print_trainable_parameters()
 
 # Save the model
 checkpoint_path = args.save_path
-OtterForConditionalGeneration.save_pretrained(model, checkpoint_path)
+FlamingoForConditionalGeneration.save_pretrained(model, checkpoint_path)

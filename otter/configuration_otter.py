@@ -8,6 +8,7 @@ import sys
 sys.path.append("/data1/Dataengine/vision_language_model/Otter/")
 from flamingo.falcon.configuration_RW import RWConfig
 from flamingo.mpt.configuration_mpt import MPTConfig
+from flamingo.mpt_redpajama.configuration_mosaic_gpt import MosaicGPTConfig
 
 logger = logging.get_logger(__name__)
 
@@ -66,6 +67,8 @@ class OtterConfig(PretrainedConfig):
         if "architectures" in text_config.keys() and text_config["architectures"] != None:
             if text_config["architectures"][0] == "MPTForCausalLM":
                 self.text_config = MPTConfig(**text_config)
+            elif text_config["architectures"][0] == "MosaicGPT":
+                self.text_config = MosaicGPTConfig(**text_config)
             elif text_config["architectures"][0] == "RWForCausalLM":
                 self.text_config = RWConfig(**text_config)
             elif text_config["architectures"][0] == "LlamaForCausalLM":
